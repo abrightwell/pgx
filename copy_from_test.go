@@ -907,6 +907,8 @@ func TestConnCopyFromAutomaticStringConversion(t *testing.T) {
 func TestConnCopyFromAutomaticStringConversionArray(t *testing.T) {
 	t.Parallel()
 
+	skipCockroachDB(t, "Server does not support nested arrays (https://github.com/cockroachdb/cockroach/issues/36815)")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -933,6 +935,52 @@ func TestConnCopyFromAutomaticStringConversionArray(t *testing.T) {
 	nums, err := pgx.CollectRows(rows, pgx.RowTo[[]int64])
 	require.NoError(t, err)
 	require.Equal(t, [][]int64{{42}, {7}, {8, 9}, {10, 11, 12, 13}}, nums)
+
+	ensureConnValid(t, conn)
+}
+
+// https://github.com/jackc/pgx/issues/2385
+func TestConnCopyFromMultiDimensionalArray(t *testing.T) {
+	t.Parallel()
+
+	skipCockroachDB(t, "Server does not support nested arrays (https://github.com/cockroachdb/cockroach/issues/36815)")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	conn := mustConnectString(t, os.Getenv("PGX_TEST_DATABASE"))
+	defer closeConn(t, conn)
+
+	mustExec(t, conn, `create temporary table foo(
+		a text[]
+	)`)
+
+	inputRows := [][]any{
+		{"{one,two,three}"},
+		{"{{one,two,three},{four,five,six}}"},
+		{"{{{one,two},{three,four}},{{five,six},{seven,eight}}}"},
+	}
+
+	copyCount, err := conn.CopyFrom(ctx, pgx.Identifier{"foo"}, []string{"a"}, pgx.CopyFromRows(inputRows))
+	require.NoError(t, err)
+	require.EqualValues(t, len(inputRows), copyCount)
+
+	rows, err := conn.Query(ctx, "select a::text from foo")
+	require.NoError(t, err)
+
+	var outputRows [][]any
+	for rows.Next() {
+		row, err := rows.Values()
+		require.NoError(t, err)
+		outputRows = append(outputRows, row)
+	}
+	require.NoError(t, rows.Err())
+
+	require.Equal(t, [][]any{
+		{"{one,two,three}"},
+		{"{{one,two,three},{four,five,six}}"},
+		{"{{{one,two},{three,four}},{{five,six},{seven,eight}}}"},
+	}, outputRows)
 
 	ensureConnValid(t, conn)
 }

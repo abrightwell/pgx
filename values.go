@@ -53,11 +53,40 @@ func tryScanStringCopyValueThenEncode(m *pgtype.Map, buf []byte, oid uint32, arg
 		s = string(textBuf)
 	}
 
+	// Scan the text representation into a value that preserves type-specific
+	// structure. By default, scanning into *any delegates to Codec.DecodeValue,
+	// which is lossless for most types (e.g. text, numeric, bool).
+	//
+	// However, some codecs produce a lossy representation (e.g.
+	// ArrayCodec.DecodeValue drops array dimensions). For those, scan into a
+	// concrete type that retains the full structure needed for a faithful
+	// binary re-encode.
 	var v any
-	err := m.Scan(oid, TextFormatCode, []byte(s), &v)
-	if err != nil {
-		return nil, err
+	switch codecForOID(m, oid).(type) {
+	case *pgtype.ArrayCodec:
+		// Scan into Array[any] because scanning into v directly goes through
+		// ArrayCodec.DecodeValue which uses []any, a flat slice that discards
+		// dimension information for multidimensional arrays.
+		//
+		// https://github.com/jackc/pgx/issues/2385
+		var arr pgtype.Array[any]
+		if err := m.Scan(oid, TextFormatCode, []byte(s), &arr); err != nil {
+			return nil, err
+		}
+		v = arr
+	default:
+		if err := m.Scan(oid, TextFormatCode, []byte(s), &v); err != nil {
+			return nil, err
+		}
 	}
 
 	return m.Encode(oid, BinaryFormatCode, v, buf)
+}
+
+// codecForOID returns the Codec for the given OID, or nil if not found.
+func codecForOID(m *pgtype.Map, oid uint32) pgtype.Codec {
+	if t, ok := m.TypeForOID(oid); ok {
+		return t.Codec
+	}
+	return nil
 }
